@@ -1,0 +1,382 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Play, RotateCcw, Trash2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Music, Sparkles, ChevronLeft, ChevronRight } from 'lucide-react';
+
+// --- サウンド生成ユーティリティ ---
+// Web Audio APIを使って、簡単なシンセサイザー音を鳴らします
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+const playTone = (freq, type = 'sine', duration = 0.1, vol = 0.1) => {
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  const oscillator = audioCtx.createOscillator();
+  const gainNode = audioCtx.createGain();
+  
+  oscillator.type = type;
+  oscillator.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  
+  // 音の立ち上がりと消え方を少し滑らかに
+  gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+  gainNode.gain.linearRampToValueAtTime(vol, audioCtx.currentTime + 0.02);
+  gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration);
+  
+  oscillator.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+  
+  oscillator.start();
+  oscillator.stop(audioCtx.currentTime + duration);
+};
+
+// アクションごとの効果音
+const sounds = {
+  move: () => playTone(440, 'sine', 0.15), // ポッ
+  bump: () => playTone(150, 'sawtooth', 0.2), // ブッ（壁にぶつかる）
+  music: () => {
+    playTone(523.25, 'triangle', 0.1); // ド
+    setTimeout(() => playTone(659.25, 'triangle', 0.1), 100); // ミ
+    setTimeout(() => playTone(783.99, 'triangle', 0.2), 200); // ソ
+  },
+  sparkle: () => {
+    playTone(880, 'square', 0.05);
+    setTimeout(() => playTone(1760, 'square', 0.1), 50);
+  },
+  remove: () => playTone(300, 'sawtooth', 0.1), // ポイッ
+  slide: () => playTone(700, 'sine', 0.05), // カチャッ
+  finish: () => {
+    playTone(523.25, 'sine', 0.1);
+    setTimeout(() => playTone(1046.50, 'sine', 0.3), 150);
+  }
+};
+
+// --- コマンドの定義 ---
+const COMMANDS = {
+  UP: { id: 'UP', icon: ArrowUp, color: 'bg-blue-400', shadow: 'shadow-blue-600' },
+  DOWN: { id: 'DOWN', icon: ArrowDown, color: 'bg-green-400', shadow: 'shadow-green-600' },
+  LEFT: { id: 'LEFT', icon: ArrowLeft, color: 'bg-yellow-400', shadow: 'shadow-yellow-600' },
+  RIGHT: { id: 'RIGHT', icon: ArrowRight, color: 'bg-red-400', shadow: 'shadow-red-600' },
+  MUSIC: { id: 'MUSIC', icon: Music, color: 'bg-pink-400', shadow: 'shadow-pink-600' },
+  SPARKLE: { id: 'SPARKLE', icon: Sparkles, color: 'bg-purple-400', shadow: 'shadow-purple-600' }
+};
+
+const GRID_SIZE = 5;
+
+export default function App() {
+  const [program, setProgram] = useState([]);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentStep, setCurrentStep] = useState(-1);
+  const [characterPos, setCharacterPos] = useState({ x: 2, y: 2 });
+  const [characterAction, setCharacterAction] = useState('idle'); // idle, jump, spin, bump
+  const [facing, setFacing] = useState(1); // 1: right, -1: left
+  const [selectedIndex, setSelectedIndex] = useState(null); // 選択されたブロック
+
+  // プログラムにコマンドを追加
+  const addCommand = (cmdId) => {
+    if (isPlaying) return;
+    if (program.length >= 12) return; // 最大12個まで
+    
+    // 最初のクリックでAudioContextを有効化
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    playTone(600, 'sine', 0.05, 0.05); // ピッというクリック音
+    
+    setProgram([...program, cmdId]);
+    setSelectedIndex(null); // ブロック追加時は選択を解除
+  };
+
+  // プログラムを削除
+  const clearProgram = () => {
+    if (isPlaying) return;
+    setProgram([]);
+    setSelectedIndex(null);
+    resetCharacter();
+  };
+
+  // 個別のブロックを削除
+  const removeCommand = (index) => {
+    if (isPlaying) return;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    sounds.remove();
+    
+    const newProgram = [...program];
+    newProgram.splice(index, 1);
+    setProgram(newProgram);
+    setSelectedIndex(null); // 削除したらメニューを閉じる
+  };
+
+  // ブロックを移動
+  const moveCommand = (index, direction) => {
+    if (isPlaying) return;
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= program.length) return;
+
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    sounds.slide();
+
+    const newProgram = [...program];
+    // 場所をいれかえる
+    const temp = newProgram[index];
+    newProgram[index] = newProgram[newIndex];
+    newProgram[newIndex] = temp;
+    
+    setProgram(newProgram);
+    setSelectedIndex(newIndex); // 移動先を追従して選択状態にする
+  };
+
+  // キャラクターを初期位置に戻す
+  const resetCharacter = () => {
+    setCharacterPos({ x: 2, y: 2 });
+    setCharacterAction('idle');
+    setFacing(1);
+    setCurrentStep(-1);
+  };
+
+  // プログラムの実行
+  const runProgram = useCallback(async () => {
+    if (program.length === 0 || isPlaying) return;
+    
+    setIsPlaying(true);
+    setSelectedIndex(null); // 実行開始時に選択を解除
+    resetCharacter();
+    
+    // 少し待ってから開始
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    let currentX = 2;
+    let currentY = 2;
+    let currentFacing = 1;
+
+    for (let i = 0; i < program.length; i++) {
+      setCurrentStep(i);
+      const cmd = program[i];
+      let hasBumped = false;
+
+      // コマンドごとの処理
+      if (cmd === 'UP') {
+        if (currentY > 0) currentY -= 1; else hasBumped = true;
+      } else if (cmd === 'DOWN') {
+        if (currentY < GRID_SIZE - 1) currentY += 1; else hasBumped = true;
+      } else if (cmd === 'LEFT') {
+        currentFacing = -1;
+        if (currentX > 0) currentX -= 1; else hasBumped = true;
+      } else if (cmd === 'RIGHT') {
+        currentFacing = 1;
+        if (currentX < GRID_SIZE - 1) currentX += 1; else hasBumped = true;
+      }
+
+      // 状態の更新
+      setFacing(currentFacing);
+      
+      if (hasBumped) {
+        setCharacterAction('bump');
+        sounds.bump();
+      } else if (cmd === 'MUSIC') {
+        setCharacterAction('jump');
+        sounds.music();
+      } else if (cmd === 'SPARKLE') {
+        setCharacterAction('spin');
+        sounds.sparkle();
+      } else {
+        setCharacterAction('idle');
+        setCharacterPos({ x: currentX, y: currentY });
+        sounds.move();
+      }
+
+      // アニメーションを待つ
+      await new Promise(resolve => setTimeout(resolve, 600));
+      
+      // アクション状態をリセット
+      setCharacterAction('idle');
+    }
+
+    // 終了処理
+    setCurrentStep(-1);
+    setIsPlaying(false);
+    sounds.finish();
+  }, [program, isPlaying]);
+
+  return (
+    <div className="min-h-screen bg-sky-100 flex flex-col items-center py-6 px-4 font-sans select-none">
+      
+      {/* タイトルエリア (少しだけ文字、あとはビジュアル) */}
+      <div className="flex items-center gap-3 mb-6">
+        <span className="text-4xl">🤖</span>
+        <h1 className="text-2xl md:text-3xl font-bold text-sky-800 tracking-wider">
+          うごかしてみよう
+        </h1>
+        <span className="text-4xl">🐶</span>
+      </div>
+
+      {/* メインステージとプログラムエリアのコンテナ */}
+      <div className="w-full max-w-2xl bg-white rounded-[2rem] shadow-xl p-4 md:p-6 border-4 border-white/50 relative overflow-hidden">
+        
+        {/* --- ステージ (グリッド) --- */}
+        <div className="relative w-full aspect-square max-w-[400px] mx-auto bg-green-100 rounded-2xl border-4 border-green-200 overflow-hidden shadow-inner mb-6">
+          {/* グリッド線を描画 */}
+          <div className="absolute inset-0 grid grid-cols-5 grid-rows-5 pointer-events-none opacity-40">
+            {Array.from({ length: 25 }).map((_, i) => (
+              <div key={i} className="border border-green-300"></div>
+            ))}
+          </div>
+
+          {/* キャラクター */}
+          <div 
+            className="absolute transition-all duration-300 ease-in-out flex items-center justify-center text-5xl md:text-6xl"
+            style={{
+              width: '20%',
+              height: '20%',
+              left: `${characterPos.x * 20}%`,
+              top: `${characterPos.y * 20}%`,
+              transform: `scaleX(${facing})`,
+              zIndex: 10
+            }}
+          >
+            <div className={`
+              transform transition-transform
+              ${characterAction === 'jump' ? '-translate-y-4 md:-translate-y-8 duration-200' : ''}
+              ${characterAction === 'spin' ? 'rotate-180 duration-500' : 'rotate-0'}
+              ${characterAction === 'bump' ? 'translate-x-1 -translate-x-1 duration-100' : ''}
+            `}>
+              🐶
+            </div>
+            
+            {/* エフェクト表示 */}
+            {characterAction === 'jump' && (
+              <span className="absolute -top-4 -right-4 text-3xl animate-ping">🎵</span>
+            )}
+            {characterAction === 'spin' && (
+              <span className="absolute -top-4 -left-4 text-3xl animate-spin">✨</span>
+            )}
+            {characterAction === 'bump' && (
+              <span className="absolute -top-4 text-3xl animate-bounce">💢</span>
+            )}
+          </div>
+        </div>
+
+        {/* --- プログラム表示エリア (キュー) --- */}
+        <div 
+          className="bg-slate-100 rounded-xl p-3 min-h-[80px] mb-6 flex flex-wrap gap-2 items-center justify-start shadow-inner border-2 border-slate-200 cursor-pointer"
+          onClick={() => setSelectedIndex(null)} // 余白をタッチしたら選択解除
+        >
+          {program.length === 0 && (
+            <div className="w-full text-center text-slate-400 font-bold text-lg pointer-events-none">
+              ブロックを ならべてね！
+            </div>
+          )}
+          {program.map((cmdId, index) => {
+            const cmd = COMMANDS[cmdId];
+            const Icon = cmd.icon;
+            const isActive = index === currentStep;
+            const isSelected = index === selectedIndex && !isPlaying;
+            
+            return (
+              <div key={index} className="relative">
+                {/* 選択時のポップアップメニュー */}
+                {isSelected && (
+                  <div className="absolute -top-16 left-1/2 -translate-x-1/2 bg-white rounded-full shadow-xl border-2 border-slate-200 flex items-center p-1 gap-1 z-20 animate-bounce" style={{ animationIterationCount: 1, animationDuration: '0.2s' }}>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); moveCommand(index, -1); }} 
+                      disabled={index === 0} 
+                      className="p-2 text-slate-400 hover:text-blue-500 disabled:opacity-20 active:bg-slate-100 rounded-full transition-colors"
+                    >
+                      <ChevronLeft size={28} strokeWidth={3} />
+                    </button>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); removeCommand(index); }} 
+                      className="p-2 text-red-400 hover:text-red-500 active:bg-red-50 rounded-full transition-colors"
+                    >
+                      <Trash2 size={24} strokeWidth={3} />
+                    </button>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); moveCommand(index, 1); }} 
+                      disabled={index === program.length - 1} 
+                      className="p-2 text-slate-400 hover:text-blue-500 disabled:opacity-20 active:bg-slate-100 rounded-full transition-colors"
+                    >
+                      <ChevronRight size={28} strokeWidth={3} />
+                    </button>
+                    
+                    {/* 吹き出しのしっぽ */}
+                    <div className="absolute -bottom-[10px] left-1/2 -translate-x-1/2 w-0 h-0 border-l-[8px] border-l-transparent border-r-[8px] border-r-transparent border-t-[10px] border-t-slate-200">
+                      <div className="absolute -top-[12px] -left-[6px] w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[8px] border-t-white"></div>
+                    </div>
+                  </div>
+                )}
+
+                <div 
+                  onClick={(e) => { 
+                    e.stopPropagation(); 
+                    if (!isPlaying) setSelectedIndex(isSelected ? null : index); 
+                  }}
+                  className={`
+                    w-12 h-12 md:w-14 md:h-14 rounded-xl flex items-center justify-center text-white cursor-pointer
+                    ${cmd.color} border-b-4 border-black/20
+                    ${isActive ? 'scale-110 ring-4 ring-yellow-400 shadow-lg' : 'shadow-sm'}
+                    ${isSelected ? 'ring-4 ring-blue-400 scale-105' : ''}
+                    hover:brightness-110 active:scale-95
+                    transition-all duration-200
+                  `}
+                >
+                  <Icon size={28} strokeWidth={3} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* --- コマンドパレット (入力ボタン) --- */}
+        <div className="grid grid-cols-3 md:grid-cols-6 gap-3 mb-6">
+          {Object.values(COMMANDS).map((cmd) => {
+            const Icon = cmd.icon;
+            return (
+              <button
+                key={cmd.id}
+                onClick={() => addCommand(cmd.id)}
+                disabled={isPlaying || program.length >= 12}
+                className={`
+                  ${cmd.color} text-white p-4 rounded-2xl flex items-center justify-center
+                  border-b-8 ${cmd.shadow} active:border-b-0 active:translate-y-2
+                  transition-all duration-100 disabled:opacity-50 disabled:cursor-not-allowed
+                  hover:brightness-110
+                `}
+              >
+                <Icon size={36} strokeWidth={3} />
+              </button>
+            );
+          })}
+        </div>
+
+        {/* --- コントロールボタン --- */}
+        <div className="flex justify-center gap-6">
+          <button
+            onClick={clearProgram}
+            disabled={isPlaying || program.length === 0}
+            className="w-20 h-20 bg-slate-300 text-slate-700 rounded-full flex items-center justify-center border-b-8 border-slate-400 active:border-b-0 active:translate-y-2 transition-all disabled:opacity-50 hover:bg-slate-200"
+          >
+            <Trash2 size={32} strokeWidth={3} />
+          </button>
+          
+          <button
+            onClick={runProgram}
+            disabled={isPlaying || program.length === 0}
+            className={`
+              w-32 h-20 rounded-full flex items-center justify-center
+              border-b-8 active:border-b-0 active:translate-y-2 transition-all
+              ${isPlaying 
+                ? 'bg-orange-400 border-orange-600 text-white' 
+                : 'bg-green-500 border-green-700 text-white hover:bg-green-400'
+              }
+              disabled:opacity-50
+            `}
+          >
+            {isPlaying ? (
+              <div className="flex gap-2 items-center">
+                <span className="w-4 h-4 bg-white rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-4 h-4 bg-white rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-4 h-4 bg-white rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              </div>
+            ) : (
+              <Play size={48} strokeWidth={3} className="ml-2 fill-white" />
+            )}
+          </button>
+        </div>
+
+      </div>
+    </div>
+  );
+}
